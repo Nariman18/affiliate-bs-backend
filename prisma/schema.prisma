@@ -1,0 +1,195 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN_SUB_AFFILIATE
+  BASIC_SUB_AFFILIATE
+  AFFILIATE_MANAGER
+}
+
+enum OfferStatus {
+  ACTIVE
+  PAUSED
+  ARCHIVED
+}
+
+enum RequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum PaymentStatus {
+  PENDING
+  APPROVED
+  PAID
+}
+
+model User {
+  id        String   @id @default(cuid())
+  username  String   @unique
+  email     String   @unique
+  password  String
+  role      Role     @default(AFFILIATE_MANAGER)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  supervisorId String?
+  supervisor   User?   @relation("Supervision", fields: [supervisorId], references: [id])
+  subordinates User[]  @relation("Supervision")
+
+  profile        UserProfile?
+  paymentMethods PaymentMethod[]
+  payoutRequests PayoutRequest[]
+  offerRequests  OfferRequest[]
+  createdOffers  Offer[]          
+  commissions    Commission[]     @relation("RecipientCommissions")
+}
+
+model UserProfile {
+  id               String  @id @default(cuid())
+  displayName      String?
+  telegramHandle   String?
+  pendingBalance   Float   @default(0)
+  approvedBalance  Float   @default(0)
+  paidBalance      Float   @default(0)
+  userId           String  @unique
+  user             User    @relation(fields: [userId], references: [id])
+}
+
+
+model Offer {
+  id            String      @id @default(cuid())
+  name          String                         
+  category      String
+  description   String?
+  logoUrl       String?                       
+  casinoUrl     String?                       
+  targetCountry String?                       
+  geoTargets    String[]    @default([])      
+  minDeposit    Float?                        
+  commissionPct Float       @default(10)       
+  isVisible     Boolean     @default(true)     
+  status        OfferStatus @default(ACTIVE)
+
+  createdById   String
+  createdBy     User        @relation(fields: [createdById], references: [id])
+
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  offerRequests OfferRequest[]
+  links         Link[]
+}
+
+
+model OfferRequest {
+  id        String        @id @default(cuid())
+  userId    String
+  user      User          @relation(fields: [userId], references: [id])
+  offerId   String
+  offer     Offer         @relation(fields: [offerId], references: [id])
+  status    RequestStatus @default(PENDING)
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  @@unique([userId, offerId])
+}
+
+
+model Link {
+  id          String    @id @default(cuid())
+  name        String
+  casinoUrl   String               
+  subId       String?
+  offerId     String
+  offer       Offer     @relation(fields: [offerId], references: [id])
+  affiliateId String                
+  clicks      Click[]
+  deposits    Deposit[]
+  createdAt   DateTime  @default(now())
+}
+
+
+model Click {
+  id         String   @id @default(cuid())
+  linkId     String
+  link       Link     @relation(fields: [linkId], references: [id])
+  ipAddress  String?
+  userAgent  String?
+  country    String?
+  deviceType String?
+  os         String?
+  isUnique   Boolean  @default(true)
+  isInvalid  Boolean  @default(false)
+  createdAt  DateTime @default(now())
+}
+
+
+model Deposit {
+  id        String       @id @default(cuid())
+  linkId    String
+  link      Link         @relation(fields: [linkId], references: [id])
+  amount    Float
+  currency  String       @default("USD")
+  subId     String?
+  status    String       @default("confirmed")
+  createdAt DateTime     @default(now())
+
+  commissions Commission[]
+}
+
+
+model Commission {
+  id          String        @id @default(cuid())
+  depositId   String
+  deposit     Deposit       @relation(fields: [depositId], references: [id])
+  recipientId String
+  recipient   User          @relation("RecipientCommissions", fields: [recipientId], references: [id])
+  amount      Float
+  percentage  Float         @default(10)
+  status      PaymentStatus @default(PENDING)
+
+  requestedApproval   Boolean   @default(false)
+  requestedApprovalAt DateTime?
+
+  approvedAt DateTime?
+  paidAt     DateTime?
+  note       String?        
+
+  createdAt DateTime @default(now())
+}
+
+
+model PayoutRequest {
+  id              String        @id @default(cuid())
+  amount          Float
+  status          PaymentStatus @default(PENDING)
+  userId          String
+  user            User          @relation(fields: [userId], references: [id])
+  paymentMethodId String?
+  paymentMethod   PaymentMethod? @relation(fields: [paymentMethodId], references: [id])
+  txHash          String?
+  note            String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+}
+
+
+model PaymentMethod {
+  id             String          @id @default(cuid())
+  userId         String
+  user           User            @relation(fields: [userId], references: [id])
+  currency       String                  // e.g. "USDT"
+  network        String          @default("TRC20")
+  address        String
+  label          String?
+  isDefault      Boolean         @default(false)
+  createdAt      DateTime        @default(now())
+  payoutRequests PayoutRequest[]
+}
