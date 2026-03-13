@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "ts-node-dev server.ts",
-    "start": "node server.ts",
+    "build": "prisma generate && tsc",
+    "start": "node dist/server.js",
     "prisma:generate": "prisma generate",
     "prisma:studio": "prisma studio"
   },
