@@ -49,6 +49,7 @@ model User {
   offerRequests  OfferRequest[]
   createdOffers  Offer[]          
   commissions    Commission[]     @relation("RecipientCommissions")
+  starredOffers  Offer[]          @relation("StarredOffers")
 }
 
 model UserProfile {
@@ -73,16 +74,17 @@ model Offer {
   targetCountry String?                       
   geoTargets    String[]    @default([])      
   minDeposit    Float?                        
-  commissionPct Float       @default(10)       
+  regPayout     Float       @default(0)
+  isNew         Boolean     @default(false)
+  isTop         Boolean     @default(false)
+  isExclusive   Boolean     @default(false)
   isVisible     Boolean     @default(true)     
   status        OfferStatus @default(ACTIVE)
-
   createdById   String
   createdBy     User        @relation(fields: [createdById], references: [id])
-
+  starredBy     User[]      @relation("StarredOffers")
   createdAt     DateTime    @default(now())
   updatedAt     DateTime    @updatedAt
-
   offerRequests OfferRequest[]
   links         Link[]
 }

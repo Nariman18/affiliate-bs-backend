@@ -22,7 +22,13 @@ router.get(
         where: { affiliateId: req.user!.userId },
         include: {
           offer: {
-            select: { name: true, category: true, commissionPct: true },
+            // UPDATED: Removed commissionPct, added regPayout and minDeposit
+            select: {
+              name: true,
+              category: true,
+              regPayout: true,
+              minDeposit: true,
+            },
           },
         },
         orderBy: { createdAt: "desc" },
@@ -41,7 +47,6 @@ router.get(
 );
 
 // ── POST /track/links — Admin or Basic Sub distributes a link to a Manager ─────
-// Body: { offerId, affiliateId, name?, subId? }
 router.post(
   "/links",
   authenticate,
@@ -50,7 +55,6 @@ router.post(
     try {
       const { offerId, affiliateId, name, subId } = req.body;
 
-      // Target must be an AFFILIATE_MANAGER
       const target = await prisma.user.findUnique({
         where: { id: affiliateId },
       });
@@ -59,16 +63,13 @@ router.post(
           .status(400)
           .json({ error: "Target user must be an Affiliate Manager" });
 
-      // Basic Sub can only assign to their own team
       if (
         req.user!.role === ROLES.BASIC &&
         target.supervisorId !== req.user!.userId
       )
-        return res
-          .status(403)
-          .json({
-            error: "You can only assign links to your own team members",
-          });
+        return res.status(403).json({
+          error: "You can only assign links to your own team members",
+        });
 
       const offer = await prisma.offer.findUnique({ where: { id: offerId } });
       if (!offer || offer.status !== "ACTIVE")
@@ -114,7 +115,6 @@ router.get("/:linkId", async (req, res) => {
       },
     });
 
-    // Append subid so the casino can fire the postback back to us
     const sep = link.casinoUrl.includes("?") ? "&" : "?";
     res.redirect(302, `${link.casinoUrl}${sep}subid=${link.id}`);
   } catch {
@@ -123,17 +123,6 @@ router.get("/:linkId", async (req, res) => {
 });
 
 // ── POST /track/postback ───────────────────────────────────────────────────────
-//
-// The casino calls this endpoint when a deposit is verified.
-// Header: x-postback-secret
-// Body  : { linkId, amount, currency?, status? }
-//
-// In a single DB transaction this creates:
-//   1 × Deposit
-//   2 × Commission (PENDING)  →  Manager (10 %) + Basic Sub (10 %)
-//   and increments both users' pendingBalance
-//
-// ─────────────────────────────────────────────────────────────────────────────
 router.post("/postback", async (req, res) => {
   if (req.headers["x-postback-secret"] !== process.env.POSTBACK_SECRET)
     return res.status(401).json({ error: "Invalid postback secret" });
@@ -148,7 +137,10 @@ router.post("/postback", async (req, res) => {
   try {
     const link = await prisma.link.findUnique({
       where: { id: linkId },
-      include: { offer: { select: { commissionPct: true, status: true } } },
+      // UPDATED: Removed commissionPct
+      include: {
+        offer: { select: { status: true, minDeposit: true, regPayout: true } },
+      },
     });
 
     if (!link || link.offer?.status !== "ACTIVE")
@@ -156,7 +148,6 @@ router.post("/postback", async (req, res) => {
         .status(404)
         .json({ error: "Link or offer not found / inactive" });
 
-    // Resolve the Manager and their Basic Sub supervisor
     const manager = await prisma.user.findUnique({
       where: { id: link.affiliateId },
       select: { id: true, role: true, supervisorId: true },
@@ -167,23 +158,25 @@ router.post("/postback", async (req, res) => {
         .status(400)
         .json({ error: "Link is not assigned to a valid Affiliate Manager" });
 
-    const pct = link.offer.commissionPct; // default 10
-    const managerAmt = round2((amount * pct) / 100);
-    const basicSubAmt = round2((amount * pct) / 100);
+    // UPDATED: Affiliate gets the full amount directly (no percentage math)
+    const managerAmt = round2(amount);
 
-    // ── Single atomic transaction ─────────────────────────────────────────
+    // Note: If you have a Basic Sub (Master Affiliate), you might want to adjust
+    // this so they get a specific override cut, rather than 100% of the deposit too.
+    // For now, it mirrors the manager.
+    const basicSubAmt = round2(amount);
+
     const result = await prisma.$transaction(async (tx) => {
       const deposit = await tx.deposit.create({
         data: { linkId, amount, currency, status },
       });
 
-      // Commission 1 — Affiliate Manager
       await tx.commission.create({
         data: {
           depositId: deposit.id,
           recipientId: manager.id,
           amount: managerAmt,
-          percentage: pct,
+          percentage: 100, // Just a placeholder now that it's full amount
           status: "PENDING",
         },
       });
@@ -194,7 +187,6 @@ router.post("/postback", async (req, res) => {
 
       let basicSubCommission = 0;
 
-      // Commission 2 — Basic Sub-Affiliate (the Manager's supervisor)
       if (manager.supervisorId) {
         const basicSub = await tx.user.findUnique({
           where: { id: manager.supervisorId },
@@ -207,7 +199,7 @@ router.post("/postback", async (req, res) => {
               depositId: deposit.id,
               recipientId: basicSub.id,
               amount: basicSubAmt,
-              percentage: pct,
+              percentage: 100,
               status: "PENDING",
             },
           });
@@ -229,7 +221,6 @@ router.post("/postback", async (req, res) => {
   }
 });
 
-// ── Helpers ────────────────────────────────────────────────────────────────────
 function buildTrackingUrl(linkId: string) {
   return `${process.env.TRACKING_BASE_URL ?? "http://localhost:5001"}/track/${linkId}`;
 }
