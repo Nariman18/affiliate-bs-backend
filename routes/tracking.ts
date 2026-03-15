@@ -22,7 +22,6 @@ router.get(
         where: { affiliateId: req.user!.userId },
         include: {
           offer: {
-            // UPDATED: Removed commissionPct, added regPayout and minDeposit
             select: {
               name: true,
               category: true,
@@ -46,7 +45,7 @@ router.get(
   },
 );
 
-// ── POST /track/links — Admin or Basic Sub distributes a link to a Manager ─────
+// ── POST /track/links — Admin distributes OR creates Test Link ─────────────────
 router.post(
   "/links",
   authenticate,
@@ -55,21 +54,31 @@ router.post(
     try {
       const { offerId, affiliateId, name, subId } = req.body;
 
-      const target = await prisma.user.findUnique({
-        where: { id: affiliateId },
-      });
-      if (!target || target.role !== ROLES.MANAGER)
-        return res
-          .status(400)
-          .json({ error: "Target user must be an Affiliate Manager" });
+      // NEW: If affiliateId is empty/missing, assign it to the user making the request (Admin Test Link)
+      const targetUserId = affiliateId || req.user!.userId;
 
-      if (
-        req.user!.role === ROLES.BASIC &&
-        target.supervisorId !== req.user!.userId
-      )
-        return res.status(403).json({
-          error: "You can only assign links to your own team members",
-        });
+      const target = await prisma.user.findUnique({
+        where: { id: targetUserId },
+      });
+
+      if (!target)
+        return res.status(404).json({ error: "Target user not found" });
+
+      // If we ARE assigning to someone else, enforce team rules
+      if (affiliateId) {
+        if (target.role !== ROLES.MANAGER)
+          return res
+            .status(400)
+            .json({ error: "Target user must be an Affiliate Manager" });
+
+        if (
+          req.user!.role === ROLES.BASIC &&
+          target.supervisorId !== req.user!.userId
+        )
+          return res.status(403).json({
+            error: "You can only assign links to your own team members",
+          });
+      }
 
       const offer = await prisma.offer.findUnique({ where: { id: offerId } });
       if (!offer || offer.status !== "ACTIVE")
@@ -81,12 +90,13 @@ router.post(
           casinoUrl: offer.casinoUrl ?? "",
           subId,
           offerId,
-          affiliateId,
+          affiliateId: targetUserId,
         },
       });
 
       res.status(201).json({ ...link, trackingUrl: buildTrackingUrl(link.id) });
-    } catch {
+    } catch (err) {
+      console.error(err);
       res.status(500).json({ error: "Failed to create link" });
     }
   },
@@ -137,7 +147,6 @@ router.post("/postback", async (req, res) => {
   try {
     const link = await prisma.link.findUnique({
       where: { id: linkId },
-      // UPDATED: Removed commissionPct
       include: {
         offer: { select: { status: true, minDeposit: true, regPayout: true } },
       },
@@ -153,17 +162,12 @@ router.post("/postback", async (req, res) => {
       select: { id: true, role: true, supervisorId: true },
     });
 
-    if (!manager || manager.role !== ROLES.MANAGER)
+    if (!manager)
       return res
         .status(400)
-        .json({ error: "Link is not assigned to a valid Affiliate Manager" });
+        .json({ error: "Link is not assigned to a valid user" });
 
-    // UPDATED: Affiliate gets the full amount directly (no percentage math)
     const managerAmt = round2(amount);
-
-    // Note: If you have a Basic Sub (Master Affiliate), you might want to adjust
-    // this so they get a specific override cut, rather than 100% of the deposit too.
-    // For now, it mirrors the manager.
     const basicSubAmt = round2(amount);
 
     const result = await prisma.$transaction(async (tx) => {
@@ -176,7 +180,7 @@ router.post("/postback", async (req, res) => {
           depositId: deposit.id,
           recipientId: manager.id,
           amount: managerAmt,
-          percentage: 100, // Just a placeholder now that it's full amount
+          percentage: 100,
           status: "PENDING",
         },
       });
