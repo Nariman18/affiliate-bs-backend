@@ -12,6 +12,7 @@ import billingRoutes from "./routes/billing";
 import referralsRoutes from "./routes/referrals";
 import affiliatesRoutes from "./routes/affiliates";
 import teamRoutes from "./routes/team";
+import commissionRoutes from "./routes/commissions";
 
 const server = express();
 const port = process.env.PORT || 5001;
@@ -55,8 +56,9 @@ server.use("/api/payouts", payoutRoutes);
 server.use("/api/billing", billingRoutes);
 server.use("/api/referrals", referralsRoutes);
 server.use("/api/affiliates", affiliatesRoutes);
-server.use("/api/tracking", trackingRoutes);
+server.use("/api/track", trackingRoutes);
 server.use("/api/team", teamRoutes);
+server.use("/api/commissions", commissionRoutes);
 
 // Health check
 server.get("/api/health", (req, res) => {

@@ -54,8 +54,16 @@ router.post(
     try {
       const { offerId, affiliateId, name, subId } = req.body;
 
-      // NEW: If affiliateId is empty/missing, assign it to the user making the request (Admin Test Link)
       const targetUserId = affiliateId || req.user!.userId;
+
+      if (affiliateId && affiliateId !== req.user!.userId) {
+        if (req.user!.role === ROLES.ADMIN) {
+          return res.status(403).json({
+            error:
+              "Admins cannot distribute links. Only Basic Sub-Affiliates can distribute tracking links.",
+          });
+        }
+      }
 
       const target = await prisma.user.findUnique({
         where: { id: targetUserId },
@@ -64,13 +72,8 @@ router.post(
       if (!target)
         return res.status(404).json({ error: "Target user not found" });
 
-      // If we ARE assigning to someone else, enforce team rules
-      if (affiliateId) {
-        if (target.role !== ROLES.MANAGER)
-          return res
-            .status(400)
-            .json({ error: "Target user must be an Affiliate Manager" });
-
+      if (affiliateId && affiliateId !== req.user!.userId) {
+        // FIXED: Removed target.role strict check. If supervisorId matches, they are on the team!
         if (
           req.user!.role === ROLES.BASIC &&
           target.supervisorId !== req.user!.userId

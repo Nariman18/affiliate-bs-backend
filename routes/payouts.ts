@@ -151,15 +151,49 @@ router.patch(
           .status(400)
           .json({ error: "Only APPROVED payouts can be marked PAID" });
 
+      // 1. Fetch all currently APPROVED commissions for this user, oldest first
+      const approvedCommissions = await prisma.commission.findMany({
+        where: { recipientId: payout.userId, status: "APPROVED" },
+        orderBy: { createdAt: "asc" },
+      });
+
+      // 2. FIFO loop: collect commission IDs until the payout amount is covered
+      let amountToCover = payout.amount;
+      const commissionIdsToPay: string[] = [];
+
+      for (const c of approvedCommissions) {
+        if (amountToCover <= 0.001) break; // Float safety
+        commissionIdsToPay.push(c.id);
+        amountToCover -= c.amount;
+      }
+
       const updated = await prisma.$transaction(async (tx) => {
+        // 3. Update the Payout Request
         const p = await tx.payoutRequest.update({
           where: { id },
           data: { status: "PAID", txHash: txHash ?? null, note: note ?? null },
         });
+
+        // 4. Update the User's Profile Balances
         await tx.userProfile.update({
           where: { userId: payout.userId },
           data: { paidBalance: { increment: payout.amount } },
         });
+
+        // 5. Update the underlying commissions to PAID so stats sync correctly
+        if (commissionIdsToPay.length > 0) {
+          await tx.commission.updateMany({
+            where: { id: { in: commissionIdsToPay } },
+            data: {
+              status: "PAID",
+              paidAt: new Date(),
+              note: note
+                ? `[Payout Processed] ${note}`
+                : `Paid via Payout Request`,
+            },
+          });
+        }
+
         return p;
       });
       res.json(updated);

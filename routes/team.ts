@@ -11,8 +11,6 @@ const router = Router();
 const prisma = new PrismaClient();
 
 // ── GET /team ──────────────────────────────────────────────────────────────────
-// Admin  → all Basic Sub-Affiliates + their manager counts / deposit totals
-// Basic  → their Affiliate Managers + click / deposit / commission data
 router.get(
   "/",
   authenticate,
@@ -22,7 +20,6 @@ router.get(
       const { userId, role } = req.user!;
 
       if (role === ROLES.ADMIN) {
-        // Admin sees all Basic Subs with subordinate counts
         const basicSubs = await prisma.user.findMany({
           where: { role: ROLES.BASIC },
           include: {
@@ -38,7 +35,6 @@ router.get(
           orderBy: { createdAt: "desc" },
         });
 
-        // Enrich with deposit totals from their managers
         const enriched = await Promise.all(
           basicSubs.map(async (sub) => {
             const managerIds = sub.subordinates.map((s) => s.id);
@@ -73,9 +69,10 @@ router.get(
         return res.json(enriched);
       }
 
-      // Basic Sub → their own Managers
+      // FIXED: Removed the strict `role: ROLES.MANAGER` check.
+      // Anyone with this supervisorId is their manager.
       const managers = await prisma.user.findMany({
-        where: { supervisorId: userId, role: ROLES.MANAGER },
+        where: { supervisorId: userId },
         include: {
           profile: {
             select: {
@@ -150,7 +147,6 @@ router.get(
       });
       if (!member) return res.status(404).json({ error: "User not found" });
 
-      // Basic Sub guard: can only view their own managers
       if (
         req.user!.role === ROLES.BASIC &&
         member.supervisorId !== req.user!.userId
