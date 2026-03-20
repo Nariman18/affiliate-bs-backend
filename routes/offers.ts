@@ -183,11 +183,9 @@ router.post("/", authenticate, requireAdmin, async (req: AuthRequest, res) => {
 
     // Add explicit URL validation
     if (!isValidUrl(casinoUrl)) {
-      return res
-        .status(400)
-        .json({
-          error: "Invalid Casino URL format. Must include http:// or https://",
-        });
+      return res.status(400).json({
+        error: "Invalid Casino URL format. Must include http:// or https://",
+      });
     }
 
     const offer = await prisma.offer.create({
@@ -226,12 +224,9 @@ router.patch(
 
       // Add explicit URL validation if attempting to update it
       if (req.body.casinoUrl !== undefined && !isValidUrl(req.body.casinoUrl)) {
-        return res
-          .status(400)
-          .json({
-            error:
-              "Invalid Casino URL format. Must include http:// or https://",
-          });
+        return res.status(400).json({
+          error: "Invalid Casino URL format. Must include http:// or https://",
+        });
       }
 
       const allowed = [
@@ -396,5 +391,36 @@ router.patch(
     }
   },
 );
+
+// ─── GET /api/offers/:id/clicks ──────────────────────────────────────────────
+router.get("/:id/clicks", authenticate, async (req: AuthRequest, res) => {
+  try {
+    const id = req.params.id as string;
+    const clicks = await prisma.click.findMany({
+      where: { link: { offerId: id } },
+      orderBy: { createdAt: "desc" },
+      take: 100, // Limit for performance on the UI
+    });
+    res.json(clicks);
+  } catch {
+    res.status(500).json({ error: "Failed to fetch clicks" });
+  }
+});
+
+// ─── GET /api/offers/:id/conversions ─────────────────────────────────────────
+router.get("/:id/conversions", authenticate, async (req: AuthRequest, res) => {
+  try {
+    const id = req.params.id as string;
+    const conversions = await prisma.deposit.findMany({
+      where: { link: { offerId: id } },
+      orderBy: { createdAt: "desc" },
+      include: { link: { select: { subId: true } } },
+      take: 100, // Limit for performance
+    });
+    res.json(conversions);
+  } catch {
+    res.status(500).json({ error: "Failed to fetch conversions" });
+  }
+});
 
 export default router;

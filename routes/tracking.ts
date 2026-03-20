@@ -112,7 +112,6 @@ router.get("/:linkId", async (req, res) => {
       req.socket.remoteAddress ||
       "127.0.0.1";
 
-    // Clean IP: Handle comma-separated lists from proxies and remove IPv6 mapped IPv4 prefixes
     const cleanIp = rawIp
       .split(",")[0]
       .trim()
@@ -122,7 +121,6 @@ router.get("/:linkId", async (req, res) => {
     let country =
       geo?.country || (req.headers["cf-ipcountry"] as string) || "Unknown";
 
-    // Fallback for local testing
     if (cleanIp === "127.0.0.1" || cleanIp === "::1") {
       country = "Local";
     }
@@ -153,21 +151,27 @@ router.get("/:linkId", async (req, res) => {
       },
     });
 
-    // 4. Construct the outgoing Casino URL safely
+    // 4. Construct the outgoing Casino URL safely (MACRO REPLACEMENT)
+    let rawUrl = link.casinoUrl;
+
+    // Replace {click_id} and {sub_id} macros if the casino provided them in the link
+    rawUrl = rawUrl.replace(/\{click_id\}/gi, click.id);
+    rawUrl = rawUrl.replace(/\{sub_id_1\}/gi, link.subId || click.id); // Default to click ID if no subId is assigned
+    rawUrl = rawUrl.replace(/\{sub_id\}/gi, link.subId || click.id);
+
     let redirectUrl: URL;
     try {
-      redirectUrl = new URL(link.casinoUrl);
+      redirectUrl = new URL(rawUrl);
     } catch (e) {
-      // Fallback if the admin forgot https://
-      redirectUrl = new URL(`https://${link.casinoUrl}`);
+      redirectUrl = new URL(`https://${rawUrl}`);
     }
 
-    // ALWAYS attach the internal click.id so postbacks work!
-    redirectUrl.searchParams.set("subid", click.id);
-
-    // If the Admin or Manager assigned a static subId to this link, append it to the casino URL
-    if (link.subId) {
-      redirectUrl.searchParams.set("aff_sub", link.subId);
+    // Fallback: If the admin pasted a clean URL WITHOUT macros, append them manually
+    if (!link.casinoUrl.includes("{click_id}")) {
+      redirectUrl.searchParams.set("click_id", click.id);
+    }
+    if (link.subId && !link.casinoUrl.includes("{sub_id_1}")) {
+      redirectUrl.searchParams.set("sub_id", link.subId);
     }
 
     // Capture ANY dynamic parameters the affiliate added to their tracking link
@@ -183,21 +187,35 @@ router.get("/:linkId", async (req, res) => {
   }
 });
 
-// ── POST /track/postback ───────────────────────────────────────────────────────
-router.post("/postback", async (req, res) => {
-  if (req.headers["x-postback-secret"] !== process.env.POSTBACK_SECRET)
+// ── POST & GET /track/postback ────────────────────────────────────────────────
+// Consolidated handler to support both standard GET Server-to-Server callbacks and custom POST requests
+const processPostback = async (req: any, res: any) => {
+  // Check for secret in Headers (POST), Query (GET), or Body (POST)
+  const secret =
+    req.headers["x-postback-secret"] || req.query.secret || req.body.secret;
+
+  if (secret !== process.env.POSTBACK_SECRET)
     return res.status(401).json({ error: "Invalid postback secret" });
 
-  const { clickId, amount, currency = "USD" } = req.body;
+  // Map the parameters from either the query string or body payload
+  const clickId =
+    req.body.clickId ||
+    req.query.click_id ||
+    req.query.clickId ||
+    req.query.subid;
+  const amountRaw = req.body.amount || req.query.amount || req.query.payout;
+  const currency = req.body.currency || req.query.currency || "USD";
 
-  if (!clickId || typeof amount !== "number" || amount <= 0)
+  const amount = parseFloat(amountRaw);
+
+  if (!clickId || isNaN(amount) || amount <= 0)
     return res
       .status(400)
-      .json({ error: "clickId and a positive numeric amount are required" });
+      .json({ error: "click_id and a positive numeric amount are required" });
 
   try {
     const click = await prisma.click.findUnique({
-      where: { id: clickId },
+      where: { id: clickId as string },
       include: {
         link: {
           include: {
@@ -231,9 +249,9 @@ router.post("/postback", async (req, res) => {
         data: {
           linkId: link.id,
           amount,
-          currency,
+          currency: currency as string,
           status: "PENDING",
-          subId: clickId,
+          subId: clickId as string,
         },
       });
 
@@ -285,7 +303,11 @@ router.post("/postback", async (req, res) => {
     console.error("Postback error:", err);
     res.status(500).json({ error: "Postback processing failed" });
   }
-});
+};
+
+// Route the unified handler to both methods
+router.post("/postback", processPostback);
+router.get("/postback", processPostback);
 
 function buildTrackingUrl(linkId: string, subId?: string | null) {
   const base = `${process.env.TRACKING_BASE_URL ?? "http://localhost:5001"}/api/track/${linkId}`;
