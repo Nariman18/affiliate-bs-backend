@@ -5,15 +5,31 @@ import { authenticate, AuthRequest, ROLES } from "../middleware/auth";
 const router = Router();
 const prisma = new PrismaClient();
 
+// FIX 2: Ensure Basic Subs see their own links in addition to their team's
 async function getLinkWhere(userId: string, role: string) {
   if (role === ROLES.ADMIN) return {};
   if (role === ROLES.BASIC) {
     const ids = await prisma.user
       .findMany({ where: { supervisorId: userId }, select: { id: true } })
       .then((u) => u.map((x) => x.id));
+
+    ids.push(userId); // <--- Injects the Basic Sub's own ID
+
     return { affiliateId: { in: ids } };
   }
   return { affiliateId: userId };
+}
+
+// FIX 1: Make sure the "to" date includes the ENTIRE day until 23:59:59
+function getDateFilter(from?: any, to?: any) {
+  const dateFilter: any = {};
+  if (from) dateFilter.gte = new Date(from as string);
+  if (to) {
+    const d = new Date(to as string);
+    d.setUTCHours(23, 59, 59, 999);
+    dateFilter.lte = d;
+  }
+  return dateFilter;
 }
 
 // ── GET /transactions/conversions ──────────────────────────────────────────────
@@ -25,10 +41,7 @@ router.get("/conversions", authenticate, async (req: AuthRequest, res) => {
     const skip = (parseInt(page as string) - 1) * parseInt(limit as string);
     const take = parseInt(limit as string);
     const linkWhere = await getLinkWhere(userId, role);
-
-    const dateFilter: any = {};
-    if (from) dateFilter.gte = new Date(from as string);
-    if (to) dateFilter.lte = new Date(to as string);
+    const dateFilter = getDateFilter(from, to);
 
     const where: any = {
       link: {
@@ -80,18 +93,19 @@ router.get("/conversions", authenticate, async (req: AuthRequest, res) => {
 router.get("/clicks", authenticate, async (req: AuthRequest, res) => {
   try {
     const { userId, role } = req.user!;
-    const { from, to, invalid, page = "1", limit = "50" } = req.query;
+    // ADDED offerId extraction here:
+    const { from, to, invalid, offerId, page = "1", limit = "50" } = req.query;
 
     const skip = (parseInt(page as string) - 1) * parseInt(limit as string);
     const take = parseInt(limit as string);
     const linkWhere = await getLinkWhere(userId, role);
-
-    const dateFilter: any = {};
-    if (from) dateFilter.gte = new Date(from as string);
-    if (to) dateFilter.lte = new Date(to as string);
+    const dateFilter = getDateFilter(from, to);
 
     const where: any = {
-      link: linkWhere,
+      link: {
+        ...linkWhere,
+        ...(offerId ? { offerId } : {}), // <-- ADDED THIS FILTER
+      },
       ...(Object.keys(dateFilter).length ? { createdAt: dateFilter } : {}),
       ...(invalid !== undefined ? { isInvalid: invalid === "true" } : {}),
     };
@@ -134,10 +148,7 @@ router.get("/postbacks", authenticate, async (req: AuthRequest, res) => {
     const { userId, role } = req.user!;
     const { from, to } = req.query;
     const linkWhere = await getLinkWhere(userId, role);
-
-    const dateFilter: any = {};
-    if (from) dateFilter.gte = new Date(from as string);
-    if (to) dateFilter.lte = new Date(to as string);
+    const dateFilter = getDateFilter(from, to);
 
     const deposits = await prisma.deposit.findMany({
       where: {

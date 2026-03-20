@@ -16,14 +16,18 @@
     "cors": "^2.8.6",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
+    "geoip-lite": "^1.4.10",
     "helmet": "^8.1.0",
-    "jsonwebtoken": "^9.0.3"
+    "jsonwebtoken": "^9.0.3",
+    "ua-parser-js": "^2.0.9"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
+    "@types/geoip-lite": "^1.4.4",
     "@types/jsonwebtoken": "^9.0.10",
+    "@types/ua-parser-js": "^0.7.39",
     "prisma": "^5.22.0",
     "ts-node-dev": "^2.0.0",
     "typescript": "5.9.3"

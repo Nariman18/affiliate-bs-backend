@@ -39,6 +39,7 @@ model User {
   role      Role     @default(AFFILIATE_MANAGER)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
   supervisorId String?
   supervisor   User?   @relation("Supervision", fields: [supervisorId], references: [id])
   subordinates User[]  @relation("Supervision")
@@ -49,6 +50,8 @@ model User {
   offerRequests  OfferRequest[]
   createdOffers  Offer[]          
   commissions    Commission[]     @relation("RecipientCommissions")
+  
+  // Added missing relation for starred offers
   starredOffers  Offer[]          @relation("StarredOffers")
 }
 
@@ -56,6 +59,7 @@ model UserProfile {
   id               String  @id @default(cuid())
   displayName      String?
   telegramHandle   String?
+  avatarUrl        String?
   pendingBalance   Float   @default(0)
   approvedBalance  Float   @default(0)
   paidBalance      Float   @default(0)
@@ -63,32 +67,38 @@ model UserProfile {
   user             User    @relation(fields: [userId], references: [id])
 }
 
-
 model Offer {
   id            String      @id @default(cuid())
-  name          String                         
+  name          String                       
   category      String
   description   String?
   logoUrl       String?                       
   casinoUrl     String?                       
-  targetCountry String?                       
+  targetCountry String?                        
   geoTargets    String[]    @default([])      
   minDeposit    Float?                        
+  commissionPct Float       @default(10) 
+  
+  // Added missing fields
   regPayout     Float       @default(0)
   isNew         Boolean     @default(false)
   isTop         Boolean     @default(false)
   isExclusive   Boolean     @default(false)
-  isVisible     Boolean     @default(true)     
+  isVisible     Boolean     @default(true)    
   status        OfferStatus @default(ACTIVE)
+
   createdById   String
   createdBy     User        @relation(fields: [createdById], references: [id])
-  starredBy     User[]      @relation("StarredOffers")
+
   createdAt     DateTime    @default(now())
   updatedAt     DateTime    @updatedAt
+
   offerRequests OfferRequest[]
   links         Link[]
+  
+  // Added missing relation for starred offers
+  starredBy     User[]      @relation("StarredOffers")
 }
-
 
 model OfferRequest {
   id        String        @id @default(cuid())
@@ -103,7 +113,6 @@ model OfferRequest {
   @@unique([userId, offerId])
 }
 
-
 model Link {
   id          String    @id @default(cuid())
   name        String
@@ -111,12 +120,11 @@ model Link {
   subId       String?
   offerId     String
   offer       Offer     @relation(fields: [offerId], references: [id])
-  affiliateId String                
+  affiliateId String               
   clicks      Click[]
   deposits    Deposit[]
   createdAt   DateTime  @default(now())
 }
-
 
 model Click {
   id         String   @id @default(cuid())
@@ -132,7 +140,6 @@ model Click {
   createdAt  DateTime @default(now())
 }
 
-
 model Deposit {
   id        String       @id @default(cuid())
   linkId    String
@@ -145,7 +152,6 @@ model Deposit {
 
   commissions Commission[]
 }
-
 
 model Commission {
   id          String        @id @default(cuid())
@@ -162,11 +168,10 @@ model Commission {
 
   approvedAt DateTime?
   paidAt     DateTime?
-  note       String?        
+  note       String?         
 
   createdAt DateTime @default(now())
 }
-
 
 model PayoutRequest {
   id              String        @id @default(cuid())
@@ -182,12 +187,11 @@ model PayoutRequest {
   updatedAt       DateTime      @updatedAt
 }
 
-
 model PaymentMethod {
   id             String          @id @default(cuid())
   userId         String
   user           User            @relation(fields: [userId], references: [id])
-  currency       String                  // e.g. "USDT"
+  currency       String                 
   network        String          @default("TRC20")
   address        String
   label          String?

@@ -2,11 +2,21 @@ import { Router } from "express";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { PrismaClient } from "@prisma/client";
+import { Storage } from "@google-cloud/storage";
 import { authenticate, AuthRequest, ROLES } from "../middleware/auth";
 
 const router = Router();
 const prisma = new PrismaClient();
 const JWT_SECRET = process.env.JWT_SECRET || "secret";
+
+const storage = new Storage({
+  projectId: process.env.GCS_PROJECT_ID,
+  credentials: {
+    client_email: process.env.GCS_CLIENT_EMAIL,
+    private_key: process.env.GCS_PRIVATE_KEY?.replace(/\\n/g, "\n"),
+  },
+});
+const bucket = storage.bucket(process.env.GCS_BUCKET_NAME || "");
 
 const OWNER_CONTACT = {
   username: process.env.OWNER_USERNAME || "bc_admin",
@@ -170,6 +180,7 @@ router.get("/me", authenticate, async (req: AuthRequest, res) => {
       pendingBalance: user.profile?.pendingBalance ?? 0,
       paidBalance: user.profile?.paidBalance ?? 0,
       defaultWallet: user.paymentMethods[0] ?? null,
+      avatarUrl: user.profile?.avatarUrl ?? null,
     });
   } catch {
     res.status(500).json({ error: "Failed to fetch user" });
@@ -179,11 +190,16 @@ router.get("/me", authenticate, async (req: AuthRequest, res) => {
 // ── PATCH /auth/me ─────────────────────────────────────────────────────────────
 router.patch("/me", authenticate, async (req: AuthRequest, res) => {
   try {
-    const { displayName, telegramHandle } = req.body;
+    const { displayName, telegramHandle, avatarUrl } = req.body;
+    const updateData: any = {};
+    if (displayName !== undefined) updateData.displayName = displayName;
+    if (telegramHandle !== undefined)
+      updateData.telegramHandle = telegramHandle;
+    if (avatarUrl !== undefined) updateData.avatarUrl = avatarUrl;
     await prisma.userProfile.upsert({
       where: { userId: req.user!.userId },
-      update: { displayName, telegramHandle },
-      create: { userId: req.user!.userId, displayName, telegramHandle },
+      update: updateData,
+      create: { userId: req.user!.userId, ...updateData },
     });
     res.json({ success: true });
   } catch {
@@ -263,5 +279,33 @@ router.get("/referral-link", authenticate, async (req: AuthRequest, res) => {
     targetRole,
   });
 });
+
+// ── POST /auth/avatar-upload-url — get signed URL for avatar upload ─────────────
+router.post(
+  "/avatar-upload-url",
+  authenticate,
+  async (req: AuthRequest, res) => {
+    try {
+      const { filename, contentType } = req.body;
+      if (!filename || !contentType)
+        return res
+          .status(400)
+          .json({ error: "filename and contentType required" });
+      const uniqueFilename = `avatars/${req.user!.userId}-${Date.now()}-${filename.replace(/\s+/g, "_")}`;
+      const file = bucket.file(uniqueFilename);
+      const [uploadUrl] = await file.getSignedUrl({
+        version: "v4",
+        action: "write",
+        expires: Date.now() + 15 * 60 * 1000,
+        contentType,
+      });
+      const publicUrl = `https://storage.googleapis.com/${bucket.name}/${uniqueFilename}`;
+      res.json({ uploadUrl, publicUrl });
+    } catch (err) {
+      console.error("Avatar upload URL error:", err);
+      res.status(500).json({ error: "Failed to generate upload URL" });
+    }
+  },
+);
 
 export default router;

@@ -22,6 +22,15 @@ const storage = new Storage({
 });
 const bucket = storage.bucket(process.env.GCS_BUCKET_NAME || "");
 
+// Helper to validate URL format
+const isValidUrl = (urlString: string) => {
+  try {
+    return Boolean(new URL(urlString));
+  } catch (e) {
+    return false;
+  }
+};
+
 // ─── POST /api/offers/upload-url ──────────────────────────────────────────────
 router.post(
   "/upload-url",
@@ -67,7 +76,6 @@ router.get("/", authenticate, async (req: AuthRequest, res) => {
       include: {
         createdBy: { select: { username: true } },
         _count: { select: { offerRequests: true, links: true } },
-        // Check if the current user has starred this offer
         starredBy: { where: { id: req.user!.userId }, select: { id: true } },
       },
       orderBy: { createdAt: "desc" },
@@ -76,7 +84,7 @@ router.get("/", authenticate, async (req: AuthRequest, res) => {
     const processedOffers = offers.map((o) => ({
       ...o,
       isStarred: o.starredBy.length > 0,
-      starredBy: undefined, // Remove nested array from response for cleaner payload
+      starredBy: undefined,
     }));
 
     if (req.user!.role === ROLES.MANAGER) {
@@ -112,7 +120,6 @@ router.post("/:id/star", authenticate, async (req: AuthRequest, res) => {
 
     if (!offer) return res.status(404).json({ error: "Offer not found" });
 
-    // If it's already starred, unstar it (disconnect)
     if (offer.starredBy.length > 0) {
       await prisma.offer.update({
         where: { id: offerId },
@@ -120,7 +127,6 @@ router.post("/:id/star", authenticate, async (req: AuthRequest, res) => {
       });
       return res.json({ isStarred: false });
     } else {
-      // If it's not starred, star it (connect)
       await prisma.offer.update({
         where: { id: offerId },
         data: { starredBy: { connect: { id: userId } } },
@@ -145,10 +151,7 @@ router.get("/:id", authenticate, async (req: AuthRequest, res) => {
     });
     if (!offer) return res.status(404).json({ error: "Offer not found" });
 
-    if (req.user!.role === ROLES.MANAGER) {
-      const { casinoUrl: _, ...safe } = offer as any;
-      return res.json(safe);
-    }
+    // NO LONGER STRIPPING casinoUrl FOR MANAGERS
     res.json(offer);
   } catch {
     res.status(500).json({ error: "Failed to fetch offer" });
@@ -176,6 +179,15 @@ router.post("/", authenticate, requireAdmin, async (req: AuthRequest, res) => {
 
     if (!name?.trim() || !category?.trim() || !casinoUrl?.trim()) {
       return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    // Add explicit URL validation
+    if (!isValidUrl(casinoUrl)) {
+      return res
+        .status(400)
+        .json({
+          error: "Invalid Casino URL format. Must include http:// or https://",
+        });
     }
 
     const offer = await prisma.offer.create({
@@ -211,6 +223,17 @@ router.patch(
   async (req: AuthRequest, res) => {
     try {
       const id = req.params.id as string;
+
+      // Add explicit URL validation if attempting to update it
+      if (req.body.casinoUrl !== undefined && !isValidUrl(req.body.casinoUrl)) {
+        return res
+          .status(400)
+          .json({
+            error:
+              "Invalid Casino URL format. Must include http:// or https://",
+          });
+      }
+
       const allowed = [
         "name",
         "category",
@@ -256,27 +279,15 @@ router.delete(
   async (req: AuthRequest, res) => {
     try {
       const id = req.params.id as string;
-
-      // We must delete related records first or use cascading deletes in Prisma.
-      // Since schema doesn't have cascade delete on offer requests and links, we delete them manually.
       await prisma.offerRequest.deleteMany({ where: { offerId: id } });
-
-      // Optionally handle links, but if there are clicks/deposits linked to those links,
-      // it gets complicated. A safer way for an affiliate network is to set status to ARCHIVED.
-      // But if you truly want to delete, you'd delete links too. Let's just delete the offer.
-      // If there's a constraint error, Prisma will throw and we return 500.
-
       await prisma.offer.delete({ where: { id } });
       res.json({ message: "Offer deleted successfully" });
     } catch (error: any) {
       if (error.code === "P2003") {
-        // Prisma Foreign key constraint failed
-        return res
-          .status(400)
-          .json({
-            error:
-              "Cannot delete offer because it has active tracking links or data associated with it. Please archive it instead.",
-          });
+        return res.status(400).json({
+          error:
+            "Cannot delete offer because it has active tracking links or data associated with it. Please archive it instead.",
+        });
       }
       res.status(500).json({ error: "Failed to delete offer" });
     }
@@ -284,35 +295,30 @@ router.delete(
 );
 
 // ─── POST /api/offers/:id/request ─────────────────────────────────────────────
-router.post(
-  "/:id/request",
-  authenticate,
-  requireManager,
-  async (req: AuthRequest, res) => {
-    try {
-      const id = req.params.id as string;
-      const offer = await prisma.offer.findUnique({ where: { id } });
-      if (!offer || offer.status !== "ACTIVE" || !offer.isVisible)
-        return res.status(404).json({ error: "Offer not found or inactive" });
+router.post("/:id/request", authenticate, async (req: AuthRequest, res) => {
+  try {
+    const id = req.params.id as string;
+    const offer = await prisma.offer.findUnique({ where: { id } });
+    if (!offer || offer.status !== "ACTIVE" || !offer.isVisible)
+      return res.status(404).json({ error: "Offer not found or inactive" });
 
-      const existing = await prisma.offerRequest.findUnique({
-        where: { userId_offerId: { userId: req.user!.userId, offerId: id } },
+    const existing = await prisma.offerRequest.findUnique({
+      where: { userId_offerId: { userId: req.user!.userId, offerId: id } },
+    });
+    if (existing)
+      return res.status(409).json({
+        error: "Request already submitted",
+        status: existing.status,
       });
-      if (existing)
-        return res.status(409).json({
-          error: "Request already submitted",
-          status: existing.status,
-        });
 
-      const request = await prisma.offerRequest.create({
-        data: { userId: req.user!.userId, offerId: id },
-      });
-      res.status(201).json(request);
-    } catch {
-      res.status(500).json({ error: "Failed to submit request" });
-    }
-  },
-);
+    const request = await prisma.offerRequest.create({
+      data: { userId: req.user!.userId, offerId: id },
+    });
+    res.status(201).json(request);
+  } catch {
+    res.status(500).json({ error: "Failed to submit request" });
+  }
+});
 
 router.get(
   "/:id/requests",
@@ -335,7 +341,13 @@ router.get(
         where,
         include: {
           user: {
-            select: { id: true, username: true, email: true, role: true },
+            select: {
+              id: true,
+              username: true,
+              email: true,
+              role: true,
+              supervisorId: true,
+            },
           },
         },
         orderBy: { createdAt: "desc" },

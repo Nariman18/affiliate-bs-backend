@@ -5,26 +5,31 @@ import { authenticate, AuthRequest, ROLES } from "../middleware/auth";
 const router = Router();
 const prisma = new PrismaClient();
 
-// ─── Helpers ───────────────────────────────────────────────────────────────────
+// FIX 1: Make sure the "to" date includes the ENTIRE day until 23:59:59
 function getDateRange(from?: string, to?: string) {
   const now = new Date();
   const start = from
     ? new Date(from)
     : new Date(now.getFullYear(), now.getMonth(), 1);
   const end = to ? new Date(to) : now;
+
+  if (to) {
+    end.setUTCHours(23, 59, 59, 999);
+  }
+
   return { start, end };
 }
 
-// Builds a Prisma `where` clause for the Link model based on role.
-// MANAGER : their own links
-// BASIC   : their managers' links
-// ADMIN   : all links (empty where = unrestricted)
+// FIX 2: Ensure Basic Subs see their own links in addition to their team's
 async function getLinkWhere(userId: string, role: string) {
   if (role === ROLES.ADMIN) return {};
   if (role === ROLES.BASIC) {
     const ids = await prisma.user
       .findMany({ where: { supervisorId: userId }, select: { id: true } })
       .then((u) => u.map((x) => x.id));
+
+    ids.push(userId); // <--- Injects the Basic Sub's own ID
+
     return { affiliateId: { in: ids } };
   }
   return { affiliateId: userId };
@@ -38,95 +43,87 @@ router.get("/overview", authenticate, async (req: AuthRequest, res) => {
     const { start, end } = getDateRange(from as string, to as string);
     const linkWhere = await getLinkWhere(userId, role);
 
+    // ── Common Quick Stats (all roles) ──────────────────────────────────────────
+    const [clicksData, depositsData, profile] = await Promise.all([
+      prisma.click.findMany({
+        where: { link: linkWhere, createdAt: { gte: start, lte: end } },
+        select: { isUnique: true },
+      }),
+      prisma.deposit.aggregate({
+        where: { link: linkWhere, createdAt: { gte: start, lte: end } },
+        _sum: { amount: true },
+        _count: true,
+      }),
+      prisma.userProfile.findUnique({
+        where: { userId },
+        select: {
+          pendingBalance: true,
+          approvedBalance: true,
+          paidBalance: true,
+        },
+      }),
+    ]);
+
+    const totalClicks = clicksData.length;
+    const uniqueClicks = clicksData.filter((c) => c.isUnique).length;
+    const conversions = depositsData._count;
+    const totalRevenue = depositsData._sum.amount ?? 0;
+    const pendingBalance = profile?.pendingBalance ?? 0;
+    const approvedBalance = profile?.approvedBalance ?? 0;
+    const paidBalance = profile?.paidBalance ?? 0;
+
+    // ── Role-specific hero stats ────────────────────────────────────────────────
     if (role === ROLES.ADMIN) {
-      const [teamSize, totalDeposits, commStats, payoutStats] =
-        await Promise.all([
-          prisma.user.count({ where: { role: ROLES.BASIC } }),
-          prisma.deposit.aggregate({
-            where: { link: linkWhere, createdAt: { gte: start, lte: end } },
-            _sum: { amount: true },
-            _count: true,
-          }),
-          prisma.commission.aggregate({
-            where: { status: "PENDING", createdAt: { gte: start, lte: end } },
-            _sum: { amount: true },
-          }),
-          prisma.payoutRequest.aggregate({
-            where: { status: "PENDING" },
-            _sum: { amount: true },
-          }),
-        ]);
-
-      return res.json({
-        teamSize,
-        totalDeposits: totalDeposits._count,
-        totalRevenue: totalDeposits._sum.amount ?? 0,
-        pendingCommissions: commStats._sum.amount ?? 0,
-        pendingPayouts: payoutStats._sum.amount ?? 0,
-      });
-    }
-
-    if (role === ROLES.BASIC) {
-      const [teamSize, deposits, myCommissions] = await Promise.all([
-        prisma.user.count({ where: { supervisorId: userId } }),
-        prisma.deposit.aggregate({
-          where: { link: linkWhere, createdAt: { gte: start, lte: end } },
-          _sum: { amount: true },
-          _count: true,
-        }),
-        prisma.commission.groupBy({
-          by: ["status"],
-          where: { recipientId: userId },
+      const [totalAffiliates, pendingPayouts] = await Promise.all([
+        prisma.user.count({ where: { role: { not: ROLES.ADMIN as any } } }),
+        prisma.payoutRequest.aggregate({
+          where: { status: "PENDING" },
           _sum: { amount: true },
         }),
       ]);
 
-      const commByStatus = Object.fromEntries(
-        myCommissions.map((c) => [c.status, c._sum.amount ?? 0]),
-      );
+      return res.json({
+        totalAffiliates,
+        totalClicks,
+        totalRevenue,
+        pendingPayouts: pendingPayouts._sum.amount ?? 0,
+        uniqueClicks,
+        registrations: 0,
+        conversions,
+        approvedBalance,
+        pendingBalance,
+        paidBalance,
+      });
+    }
+
+    if (role === ROLES.BASIC) {
+      const teamSize = await prisma.user.count({
+        where: { supervisorId: userId },
+      });
+
       return res.json({
         teamSize,
-        totalDeposits: deposits._count,
-        totalRevenue: deposits._sum.amount ?? 0,
-        pendingCommission: commByStatus["PENDING"] ?? 0,
-        approvedCommission: commByStatus["APPROVED"] ?? 0,
-        paidCommission: commByStatus["PAID"] ?? 0,
+        approvedBalance,
+        pendingBalance,
+        totalRevenue,
+        totalClicks,
+        uniqueClicks,
+        registrations: 0,
+        conversions,
+        paidBalance,
       });
     }
 
     // MANAGER
-    const [clicks, deposits, myCommissions] = await Promise.all([
-      prisma.click.count({
-        where: {
-          link: { affiliateId: userId },
-          createdAt: { gte: start, lte: end },
-        },
-      }),
-      prisma.deposit.aggregate({
-        where: {
-          link: { affiliateId: userId },
-          createdAt: { gte: start, lte: end },
-        },
-        _sum: { amount: true },
-        _count: true,
-      }),
-      prisma.commission.groupBy({
-        by: ["status"],
-        where: { recipientId: userId },
-        _sum: { amount: true },
-      }),
-    ]);
-
-    const commByStatus = Object.fromEntries(
-      myCommissions.map((c) => [c.status, c._sum.amount ?? 0]),
-    );
-    res.json({
-      clicks,
-      conversions: deposits._count,
-      totalRevenue: deposits._sum.amount ?? 0,
-      pendingCommission: commByStatus["PENDING"] ?? 0,
-      approvedCommission: commByStatus["APPROVED"] ?? 0,
-      paidCommission: commByStatus["PAID"] ?? 0,
+    return res.json({
+      approvedBalance,
+      pendingBalance,
+      totalClicks,
+      conversions,
+      uniqueClicks,
+      registrations: 0,
+      totalRevenue,
+      paidBalance,
     });
   } catch {
     res.status(500).json({ error: "Failed to fetch overview" });
@@ -153,19 +150,20 @@ router.get("/general", authenticate, async (req: AuthRequest, res) => {
     ]);
 
     const dayMap: Record<string, any> = {};
-
     const getDay = (d: Date) => d.toISOString().slice(0, 10);
     const ensure = (key: string) => {
-      if (!dayMap[key]) {
+      if (!dayMap[key])
         dayMap[key] = {
           date: key,
           gross: 0,
           unique: 0,
           invalid: 0,
-          depositsCount: 0,
+          approved: 0,
+          pending: 0,
+          rejected: 0,
           revenue: 0,
+          commission: 0,
         };
-      }
     };
 
     for (const c of clicks) {
@@ -178,7 +176,9 @@ router.get("/general", authenticate, async (req: AuthRequest, res) => {
     for (const d of deposits) {
       const k = getDay(d.createdAt);
       ensure(k);
-      dayMap[k].depositsCount++;
+      if (d.status === "confirmed") dayMap[k].approved++;
+      else if (d.status === "pending") dayMap[k].pending++;
+      else dayMap[k].rejected++;
       dayMap[k].revenue += d.amount;
     }
 
@@ -190,10 +190,13 @@ router.get("/general", authenticate, async (req: AuthRequest, res) => {
         "gross",
         "unique",
         "invalid",
-        "depositsCount",
+        "approved",
+        "pending",
+        "rejected",
         "revenue",
+        "commission",
       ])
-        acc[k] = (acc[k] ?? 0) + row[k];
+        acc[k] = (acc[k] ?? 0) + (row[k] ?? 0);
       return acc;
     }, {});
 
@@ -237,6 +240,7 @@ router.get("/by-offer", authenticate, async (req: AuthRequest, res) => {
           unique: 0,
           conversions: 0,
           revenue: 0,
+          commission: 0,
         };
       }
       offerMap[key].clicks += link.clicks.length;
@@ -267,7 +271,8 @@ router.get("/by-country", authenticate, async (req: AuthRequest, res) => {
     const map: Record<string, any> = {};
     for (const c of clicks) {
       const key = c.country ?? "Unknown";
-      if (!map[key]) map[key] = { country: key, clicks: 0, unique: 0 };
+      if (!map[key])
+        map[key] = { country: key, clicks: 0, unique: 0, conversions: 0 };
       map[key].clicks++;
       if (c.isUnique) map[key].unique++;
     }

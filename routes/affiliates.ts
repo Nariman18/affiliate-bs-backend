@@ -11,7 +11,6 @@ const router = Router();
 const prisma = new PrismaClient();
 
 // ── GET /affiliates — Admin or Basic Sub views their affiliate managers ─────────
-// Proxies to the same logic as GET /team but kept for backward compat
 router.get(
   "/",
   authenticate,
@@ -35,6 +34,7 @@ router.get(
               displayName: true,
               pendingBalance: true,
               approvedBalance: true,
+              avatarUrl: true, // <-- ADDED THIS
             },
           },
           paymentMethods: {
@@ -65,6 +65,7 @@ router.get(
             username: mgr.username,
             email: mgr.email,
             displayName: mgr.profile?.displayName ?? mgr.username,
+            avatarUrl: mgr.profile?.avatarUrl ?? null, // <-- ADDED THIS
             pendingBalance: mgr.profile?.pendingBalance ?? 0,
             approvedBalance: mgr.profile?.approvedBalance ?? 0,
             defaultWallet: mgr.paymentMethods[0] ?? null,

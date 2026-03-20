@@ -1,8 +1,9 @@
 import { Router } from "express";
 import { PrismaClient } from "@prisma/client";
+import { UAParser } from "ua-parser-js";
+import geoip from "geoip-lite";
 import {
   authenticate,
-  requireManager,
   requireAdminOrBasic,
   AuthRequest,
   ROLES,
@@ -12,38 +13,33 @@ const router = Router();
 const prisma = new PrismaClient();
 
 // ── GET /track/links/mine — Affiliate Manager gets their own links ─────────────
-router.get(
-  "/links/mine",
-  authenticate,
-  requireManager,
-  async (req: AuthRequest, res) => {
-    try {
-      const links = await prisma.link.findMany({
-        where: { affiliateId: req.user!.userId },
-        include: {
-          offer: {
-            select: {
-              name: true,
-              category: true,
-              regPayout: true,
-              minDeposit: true,
-            },
+router.get("/links/mine", authenticate, async (req: AuthRequest, res) => {
+  try {
+    const links = await prisma.link.findMany({
+      where: { affiliateId: req.user!.userId },
+      include: {
+        offer: {
+          select: {
+            name: true,
+            category: true,
+            regPayout: true,
+            minDeposit: true,
           },
         },
-        orderBy: { createdAt: "desc" },
-      });
+      },
+      orderBy: { createdAt: "desc" },
+    });
 
-      res.json(
-        links.map((l) => ({
-          ...l,
-          trackingUrl: buildTrackingUrl(l.id),
-        })),
-      );
-    } catch {
-      res.status(500).json({ error: "Failed to fetch links" });
-    }
-  },
-);
+    res.json(
+      links.map((l) => ({
+        ...l,
+        trackingUrl: buildTrackingUrl(l.id, l.subId),
+      })),
+    );
+  } catch {
+    res.status(500).json({ error: "Failed to fetch links" });
+  }
+});
 
 // ── POST /track/links — Admin distributes OR creates Test Link ─────────────────
 router.post(
@@ -55,16 +51,6 @@ router.post(
       const { offerId, affiliateId, name, subId } = req.body;
 
       const targetUserId = affiliateId || req.user!.userId;
-
-      if (affiliateId && affiliateId !== req.user!.userId) {
-        if (req.user!.role === ROLES.ADMIN) {
-          return res.status(403).json({
-            error:
-              "Admins cannot distribute links. Only Basic Sub-Affiliates can distribute tracking links.",
-          });
-        }
-      }
-
       const target = await prisma.user.findUnique({
         where: { id: targetUserId },
       });
@@ -73,14 +59,14 @@ router.post(
         return res.status(404).json({ error: "Target user not found" });
 
       if (affiliateId && affiliateId !== req.user!.userId) {
-        // FIXED: Removed target.role strict check. If supervisorId matches, they are on the team!
         if (
           req.user!.role === ROLES.BASIC &&
           target.supervisorId !== req.user!.userId
-        )
+        ) {
           return res.status(403).json({
             error: "You can only assign links to your own team members",
           });
+        }
       }
 
       const offer = await prisma.offer.findUnique({ where: { id: offerId } });
@@ -97,7 +83,9 @@ router.post(
         },
       });
 
-      res.status(201).json({ ...link, trackingUrl: buildTrackingUrl(link.id) });
+      res
+        .status(201)
+        .json({ ...link, trackingUrl: buildTrackingUrl(link.id, link.subId) });
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "Failed to create link" });
@@ -116,20 +104,80 @@ router.get("/:linkId", async (req, res) => {
     if (!link || link.offer?.status !== "ACTIVE")
       return res.status(404).send("Link not found");
 
-    await prisma.click.create({
+    // 1. Extract IP & Country (IMPROVED for Proxies & IPv6)
+    const rawIp =
+      (req.headers["x-forwarded-for"] as string) ||
+      (req.headers["x-real-ip"] as string) ||
+      req.ip ||
+      req.socket.remoteAddress ||
+      "127.0.0.1";
+
+    // Clean IP: Handle comma-separated lists from proxies and remove IPv6 mapped IPv4 prefixes
+    const cleanIp = rawIp
+      .split(",")[0]
+      .trim()
+      .replace(/^::ffff:/, "");
+
+    const geo = geoip.lookup(cleanIp);
+    let country =
+      geo?.country || (req.headers["cf-ipcountry"] as string) || "Unknown";
+
+    // Fallback for local testing
+    if (cleanIp === "127.0.0.1" || cleanIp === "::1") {
+      country = "Local";
+    }
+
+    // 2. Extract Device & OS
+    const userAgent = req.headers["user-agent"] || "";
+    const parser = new UAParser(userAgent);
+    const device = parser.getDevice();
+    const os = parser.getOS();
+
+    const deviceType =
+      device.type === "mobile"
+        ? "Mobile"
+        : device.type === "tablet"
+          ? "Tablet"
+          : "Desktop";
+    const osName = os.name || "Unknown";
+
+    // 3. Create the rich click record
+    const click = await prisma.click.create({
       data: {
         linkId: link.id,
-        ipAddress: req.ip ?? null,
-        userAgent: req.headers["user-agent"] ?? null,
-        country: (req.headers["cf-ipcountry"] as string) ?? null,
-        deviceType: /Mobi|Android/i.test(req.headers["user-agent"] ?? "")
-          ? "mobile"
-          : "desktop",
+        ipAddress: cleanIp,
+        userAgent,
+        country,
+        deviceType,
+        os: osName,
       },
     });
 
-    const sep = link.casinoUrl.includes("?") ? "&" : "?";
-    res.redirect(302, `${link.casinoUrl}${sep}subid=${link.id}`);
+    // 4. Construct the outgoing Casino URL safely
+    let redirectUrl: URL;
+    try {
+      redirectUrl = new URL(link.casinoUrl);
+    } catch (e) {
+      // Fallback if the admin forgot https://
+      redirectUrl = new URL(`https://${link.casinoUrl}`);
+    }
+
+    // ALWAYS attach the internal click.id so postbacks work!
+    redirectUrl.searchParams.set("subid", click.id);
+
+    // If the Admin or Manager assigned a static subId to this link, append it to the casino URL
+    if (link.subId) {
+      redirectUrl.searchParams.set("aff_sub", link.subId);
+    }
+
+    // Capture ANY dynamic parameters the affiliate added to their tracking link
+    for (const [key, value] of Object.entries(req.query)) {
+      if (typeof value === "string") {
+        redirectUrl.searchParams.set(key, value);
+      }
+    }
+
+    res.redirect(302, redirectUrl.toString());
   } catch {
     res.status(500).send("Error processing link");
   }
@@ -140,25 +188,29 @@ router.post("/postback", async (req, res) => {
   if (req.headers["x-postback-secret"] !== process.env.POSTBACK_SECRET)
     return res.status(401).json({ error: "Invalid postback secret" });
 
-  const { linkId, amount, currency = "USD", status = "confirmed" } = req.body;
+  const { clickId, amount, currency = "USD" } = req.body;
 
-  if (!linkId || typeof amount !== "number" || amount <= 0)
+  if (!clickId || typeof amount !== "number" || amount <= 0)
     return res
       .status(400)
-      .json({ error: "linkId and a positive numeric amount are required" });
+      .json({ error: "clickId and a positive numeric amount are required" });
 
   try {
-    const link = await prisma.link.findUnique({
-      where: { id: linkId },
+    const click = await prisma.click.findUnique({
+      where: { id: clickId },
       include: {
-        offer: { select: { status: true, minDeposit: true, regPayout: true } },
+        link: {
+          include: {
+            offer: { select: { status: true, commissionPct: true } },
+          },
+        },
       },
     });
 
-    if (!link || link.offer?.status !== "ACTIVE")
-      return res
-        .status(404)
-        .json({ error: "Link or offer not found / inactive" });
+    if (!click || !click.link || click.link.offer?.status !== "ACTIVE")
+      return res.status(404).json({ error: "Click, Link, or Offer not found" });
+
+    const link = click.link;
 
     const manager = await prisma.user.findUnique({
       where: { id: link.affiliateId },
@@ -170,12 +222,19 @@ router.post("/postback", async (req, res) => {
         .status(400)
         .json({ error: "Link is not assigned to a valid user" });
 
-    const managerAmt = round2(amount);
-    const basicSubAmt = round2(amount);
+    const managerAmt = amount;
+    const pct = link.offer.commissionPct ?? 10;
+    const basicSubAmt = round2(amount * (pct / 100));
 
     const result = await prisma.$transaction(async (tx) => {
       const deposit = await tx.deposit.create({
-        data: { linkId, amount, currency, status },
+        data: {
+          linkId: link.id,
+          amount,
+          currency,
+          status: "PENDING",
+          subId: clickId,
+        },
       });
 
       await tx.commission.create({
@@ -206,7 +265,7 @@ router.post("/postback", async (req, res) => {
               depositId: deposit.id,
               recipientId: basicSub.id,
               amount: basicSubAmt,
-              percentage: 100,
+              percentage: pct,
               status: "PENDING",
             },
           });
@@ -228,8 +287,9 @@ router.post("/postback", async (req, res) => {
   }
 });
 
-function buildTrackingUrl(linkId: string) {
-  return `${process.env.TRACKING_BASE_URL ?? "http://localhost:5001"}/track/${linkId}`;
+function buildTrackingUrl(linkId: string, subId?: string | null) {
+  const base = `${process.env.TRACKING_BASE_URL ?? "http://localhost:5001"}/api/track/${linkId}`;
+  return subId ? `${base}?sub1=${encodeURIComponent(subId)}` : base;
 }
 
 function round2(n: number) {
