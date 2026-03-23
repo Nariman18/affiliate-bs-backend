@@ -298,6 +298,53 @@ const processPostback = async (req: any, res: any) => {
       return { depositId: deposit.id, managerAmt, basicSubCommission };
     });
 
+    // ─── NEW S2S POSTBACK BLOCK START ─────────────────────────────────────────
+    // 1. Get the Webmaster's configured Postback URL from their profile
+    const affiliateProfile = await prisma.userProfile.findUnique({
+      where: { userId: manager.id },
+      select: { postbackUrl: true },
+    });
+
+    const postbackUrl = affiliateProfile?.postbackUrl;
+
+    // 2. If the Webmaster has a URL saved, parse macros and fire it off
+    if (postbackUrl) {
+      // Replace the macros with actual transaction data
+      const finalPostbackUrl = postbackUrl
+        .replace(/\{click_id\}/gi, click.id)
+        .replace(/\{sub_id\}/gi, link.subId || "")
+        // We send the managerAmt so the webmaster sees *their* actual commission
+        .replace(/\{payout\}/gi, result.managerAmt.toString())
+        .replace(/\{currency\}/gi, currency as string)
+        .replace(/\{status\}/gi, "PENDING"); // Or map it to deposit.status
+
+      // 3. Fire-and-forget GET request to the Webmaster's tracker
+      fetch(finalPostbackUrl, {
+        method: "GET",
+        headers: {
+          "User-Agent": "BadCatPartners-S2S-Tracker/1.0",
+        },
+      })
+        .then((response) => {
+          if (response.ok) {
+            console.log(
+              `[S2S SUCCESS] Webmaster: ${manager.id} | URL: ${finalPostbackUrl}`,
+            );
+          } else {
+            console.warn(
+              `[S2S WARNING] Webmaster: ${manager.id} | HTTP: ${response.status} | URL: ${finalPostbackUrl}`,
+            );
+          }
+        })
+        .catch((error) => {
+          console.error(
+            `[S2S FAILED] Webmaster: ${manager.id} | URL: ${finalPostbackUrl}`,
+            error.message,
+          );
+        });
+    }
+    // ─── NEW S2S POSTBACK BLOCK END ───────────────────────────────────────────
+
     res.json({ success: true, ...result });
   } catch (err) {
     console.error("Postback error:", err);

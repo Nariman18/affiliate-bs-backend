@@ -58,6 +58,7 @@ model User {
 model UserProfile {
   id               String  @id @default(cuid())
   displayName      String?
+  postbackUrl      String?
   telegramHandle   String?
   avatarUrl        String?
   pendingBalance   Float   @default(0)
