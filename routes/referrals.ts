@@ -21,7 +21,7 @@ router.get(
   async (req: AuthRequest, res) => {
     const { userId, role } = req.user!;
     const targetRole = role === ROLES.ADMIN ? ROLES.BASIC : ROLES.MANAGER;
-    const base = process.env.FRONTEND_URL ?? "http://localhost:3000";
+    const base = process.env.APP_URL ?? "http://localhost:3000";
     res.json({
       link: `${base}/register?ref=${userId}&role=${targetRole}`,
       targetRole,
