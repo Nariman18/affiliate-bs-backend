@@ -36,11 +36,9 @@ router.post("/register", async (req, res) => {
     if (!username?.trim())
       return res.status(400).json({ error: "Username is required" });
     if (!/^[a-zA-Z0-9_]{3,30}$/.test(username))
-      return res
-        .status(400)
-        .json({
-          error: "Username: 3–30 chars, letters/numbers/underscores only",
-        });
+      return res.status(400).json({
+        error: "Username: 3–30 chars, letters/numbers/underscores only",
+      });
     if (!email?.trim())
       return res.status(400).json({ error: "Email is required" });
     if (!password || password.length < 8)
@@ -69,19 +67,14 @@ router.post("/register", async (req, res) => {
       if (!supervisor)
         return res.status(400).json({ error: "Referral link is invalid" });
       if (assignedRole === ROLES.MANAGER && supervisor.role !== ROLES.BASIC)
-        return res
-          .status(400)
-          .json({
-            error:
-              "Affiliate Managers must be invited by a Basic Sub-Affiliate",
-          });
+        return res.status(400).json({
+          error: "Affiliate Managers must be invited by a Basic Sub-Affiliate",
+        });
       if (assignedRole === ROLES.BASIC && supervisor.role !== ROLES.ADMIN)
-        return res
-          .status(400)
-          .json({
-            error:
-              "Basic Sub-Affiliates must be invited by an Admin Sub-Affiliate",
-          });
+        return res.status(400).json({
+          error:
+            "Basic Sub-Affiliates must be invited by an Admin Sub-Affiliate",
+        });
       supervisorId = refId;
     }
 
@@ -273,7 +266,7 @@ router.get("/referral-link", authenticate, async (req: AuthRequest, res) => {
   if (role === ROLES.MANAGER)
     return res.status(403).json({ error: "Managers cannot invite users" });
   const targetRole = role === ROLES.ADMIN ? ROLES.BASIC : ROLES.MANAGER;
-  const base = process.env.FRONTEND_URL ?? "http://localhost:3000";
+  const base = process.env.APP_URL ?? "http://localhost:3000";
   res.json({
     link: `${base}/register?ref=${userId}&role=${targetRole}`,
     targetRole,
